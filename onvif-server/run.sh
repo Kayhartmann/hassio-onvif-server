@@ -113,11 +113,10 @@ options.cameras.forEach((camera, index) => {
 
   const rtspPath   = url.pathname || '/';
   const rtspPort   = parseInt(url.port, 10) || 554;
-  // Embed credentials in hostname so the onvif-server constructs:
-  // rtsp://user:pass@host:port/path
-  const targetHost = (url.username && url.password)
-    ? `${url.username}:${url.password}@${url.hostname}`
-    : url.hostname;
+  // target.hostname must be a plain IP/hostname – no credentials.
+  // The tcp proxy forwards raw TCP; RTSP auth is handled by UniFi Protect
+  // in the RTSP handshake, not by the proxy itself.
+  const targetHost = url.hostname;
 
   // Port layout per camera (no overlap with Neolink:8554 or go2rtc:8555/8556):
   //   server   = camera.port        (e.g. 8001) → ONVIF HTTP (UniFi Protect connects here)

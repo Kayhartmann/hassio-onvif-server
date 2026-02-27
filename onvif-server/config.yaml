@@ -1,5 +1,5 @@
 name: "ONVIF Server"
-version: "1.0.2"
+version: "1.0.3"
 slug: "onvif_server"
 description: "Virtual ONVIF Server für UniFi Protect – wandelt RTSP-Streams in ONVIF-Kameras um"
 url: "https://github.com/Kayhartmann/hassio-onvif-server"
