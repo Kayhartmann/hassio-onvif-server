@@ -1,7 +1,7 @@
 FROM node:18-alpine
 
 # Install git and bash (needed for run.sh)
-RUN apk add --no-cache git bash
+RUN apk add --no-cache git bash iproute2 dhcpcd
 
 # Clone the onvif-server and install dependencies
 RUN git clone https://github.com/daniela-hase/onvif-server /app

@@ -6,17 +6,71 @@ UUID_FILE="/data/uuids.json"
 ONVIF_CONFIG="/data/onvif.yaml"
 
 echo "[onvif-server] Reading options from ${OPTIONS_FILE}..."
-
 if [ ! -f "${OPTIONS_FILE}" ]; then
   echo "[onvif-server] ERROR: ${OPTIONS_FILE} not found. Is the add-on running inside Home Assistant?"
   exit 1
 fi
 
+# ─── Step 1: Detect primary network interface ────────────────────────────────
+IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+if [ -z "${IFACE}" ]; then
+  echo "[onvif-server] ERROR: Could not detect primary network interface."
+  exit 1
+fi
+echo "[onvif-server] Primary network interface: ${IFACE}"
+
+# ─── Step 2: Create one MacVLAN interface per camera ────────────────────────
+# Read camera count from options.json via Node.js (no jq dependency needed)
+CAMERA_COUNT=$(node -e "
+const o = JSON.parse(require('fs').readFileSync('/data/options.json', 'utf8'));
+process.stdout.write(String(o.cameras.length));
+")
+echo "[onvif-server] Cameras configured: ${CAMERA_COUNT}"
+
+for i in $(seq 1 "${CAMERA_COUNT}"); do
+  IDX=$(printf "%02d" "${i}")
+  MAC="a2:a2:a2:a2:a2:${IDX}"
+  VLAN="onvif-cam-${i}"
+
+  # Remove stale interface from a previous (crashed) run
+  if ip link show "${VLAN}" > /dev/null 2>&1; then
+    echo "[onvif-server] Removing stale interface ${VLAN}..."
+    ip link delete "${VLAN}" 2>/dev/null || true
+  fi
+
+  echo "[onvif-server] Creating ${VLAN} link=${IFACE} address=${MAC} type=macvlan mode=bridge"
+  ip link add "${VLAN}" link "${IFACE}" address "${MAC}" type macvlan mode bridge
+  ip link set "${VLAN}" up
+done
+
+# ─── Step 3: Request DHCP leases for all virtual interfaces ─────────────────
+echo "[onvif-server] Requesting DHCP leases (30 s timeout per interface)..."
+for i in $(seq 1 "${CAMERA_COUNT}"); do
+  VLAN="onvif-cam-${i}"
+  dhcpcd --nobackground --timeout 30 "${VLAN}" 2>&1 | sed "s/^/[${VLAN}] /" &
+done
+wait
+echo "[onvif-server] DHCP requests finished."
+
+# ─── Step 4: Wait 5 s and verify IP assignment ──────────────────────────────
+sleep 5
+
+for i in $(seq 1 "${CAMERA_COUNT}"); do
+  VLAN="onvif-cam-${i}"
+  IP=$(ip addr show "${VLAN}" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+  if [ -n "${IP}" ]; then
+    echo "[onvif-server] ${VLAN} → ${IP}"
+  else
+    echo "[onvif-server] WARNING: ${VLAN} has no IP address – ONVIF discovery may fail for this camera."
+    echo "[onvif-server] Tip: Reserve a static DHCP lease for MAC a2:a2:a2:a2:a2:$(printf '%02d' ${i}) in your router."
+  fi
+done
+
+# ─── Step 5: Generate /data/onvif.yaml ──────────────────────────────────────
 echo "[onvif-server] Generating ONVIF configuration..."
 
-# Use Node.js for JSON/YAML handling (no extra libraries needed)
 node - << 'NODEJS'
-const fs = require('fs');
+const fs     = require('fs');
 const crypto = require('crypto');
 
 const OPTIONS_FILE = '/data/options.json';
@@ -32,46 +86,46 @@ if (fs.existsSync(UUID_FILE)) {
   try {
     uuids = JSON.parse(fs.readFileSync(UUID_FILE, 'utf8'));
   } catch (e) {
-    console.warn('[onvif-server] Could not parse uuids.json, regenerating UUIDs.');
+    console.warn('[onvif-server] Could not parse uuids.json – regenerating UUIDs.');
   }
 }
 
-// Build onvif.yaml content manually (no js-yaml dependency needed)
+// Build onvif.yaml manually (no external library required)
 let yaml = 'onvif:\n';
 
 options.cameras.forEach((camera, index) => {
   // Assign or reuse a stable UUID per camera name
   if (!uuids[camera.name]) {
     uuids[camera.name] = crypto.randomUUID();
-    console.log(`[onvif-server] Generated new UUID for "${camera.name}": ${uuids[camera.name]}`);
+    console.log(`[onvif-server] Generated UUID for "${camera.name}": ${uuids[camera.name]}`);
   }
 
-  // Parse the full RTSP URL (e.g. rtsp://user:pass@host:port/path)
+  // Parse the full RTSP URL (rtsp://user:pass@host:port/path)
   let url;
   try {
     url = new URL(camera.rtsp_url);
   } catch (e) {
-    console.error(`[onvif-server] Invalid rtsp_url for camera "${camera.name}": ${camera.rtsp_url}`);
+    console.error(`[onvif-server] Invalid rtsp_url for "${camera.name}": ${camera.rtsp_url}`);
     process.exit(1);
   }
 
-  const rtspPath    = url.pathname || '/';
-  const rtspPort    = parseInt(url.port, 10) || 554;
-  // Embed credentials into hostname if present, so the onvif-server
-  // constructs: rtsp://user:pass@host:port/path
-  const targetHost  = (url.username && url.password)
+  const rtspPath   = url.pathname || '/';
+  const rtspPort   = parseInt(url.port, 10) || 554;
+  // Embed credentials in hostname so the onvif-server builds:
+  // rtsp://user:pass@host:port/path
+  const targetHost = (url.username && url.password)
     ? `${url.username}:${url.password}@${url.hostname}`
     : url.hostname;
 
-  // Each camera gets three consecutive ports:
-  //   server   = user-defined port (e.g. 8001)  → ONVIF HTTP (what UniFi Protect connects to)
-  //   rtsp     = server port + 100  (e.g. 8101)  → RTSP passthrough port
-  //   snapshot = server port + 200  (e.g. 8201)  → Snapshot HTTP port
+  // Port layout per camera (all unique, no overlap with Neolink/go2rtc):
+  //   server   = camera.port        (e.g. 8001) → ONVIF HTTP, what UniFi Protect connects to
+  //   rtsp     = camera.port + 100  (e.g. 8101) → RTSP passthrough
+  //   snapshot = camera.port + 200  (e.g. 8201) → Snapshot HTTP
   const serverPort   = camera.port;
   const rtspFwdPort  = camera.port + 100;
   const snapshotPort = camera.port + 200;
 
-  // Locally-administered unicast MAC (a2:a2:a2:a2:a2:XX)
+  // Locally-administered unicast MAC matching the MacVLAN interface
   const macSuffix = String(index + 1).padStart(2, '0');
   const mac = `a2:a2:a2:a2:a2:${macSuffix}`;
 
@@ -89,12 +143,13 @@ options.cameras.forEach((camera, index) => {
   yaml += `      framerate: ${camera.fps}\n`;
   yaml += `      bitrate: ${camera.bitrate}\n`;
   yaml += `      quality: 4\n`;
+  // lowQuality uses the same stream (go2rtc provides a single quality per path)
   yaml += `    lowQuality:\n`;
   yaml += `      rtsp: ${rtspPath}\n`;
-  yaml += `      width: 640\n`;
-  yaml += `      height: 360\n`;
+  yaml += `      width: ${camera.width}\n`;
+  yaml += `      height: ${camera.height}\n`;
   yaml += `      framerate: ${camera.fps}\n`;
-  yaml += `      bitrate: 512\n`;
+  yaml += `      bitrate: ${camera.bitrate}\n`;
   yaml += `      quality: 1\n`;
   yaml += `    target:\n`;
   yaml += `      hostname: ${targetHost}\n`;
@@ -102,18 +157,18 @@ options.cameras.forEach((camera, index) => {
   yaml += `        rtsp: ${rtspPort}\n`;
   yaml += `        snapshot: 80\n`;
 
-  console.log(`[onvif-server] Camera "${camera.name}" → ONVIF port ${serverPort}, RTSP fwd port ${rtspFwdPort}`);
+  console.log(`[onvif-server] Camera "${camera.name}": ONVIF=${serverPort}, RTSP fwd=${rtspFwdPort}, MAC=${mac}`);
 });
 
-// Persist UUIDs so they survive container restarts
+// Persist UUIDs across container restarts
 fs.writeFileSync(UUID_FILE, JSON.stringify(uuids, null, 2));
 console.log(`[onvif-server] UUIDs saved to ${UUID_FILE}`);
 
-// Write the final onvif.yaml
+// Write the final config
 fs.writeFileSync(ONVIF_CONFIG, yaml);
-console.log(`[onvif-server] Config written to ${ONVIF_CONFIG}`);
-console.log(`[onvif-server] ${options.cameras.length} camera(s) configured.`);
+console.log(`[onvif-server] Config written to ${ONVIF_CONFIG} (${options.cameras.length} camera(s))`);
 NODEJS
 
+# ─── Step 6: Start the ONVIF server ─────────────────────────────────────────
 echo "[onvif-server] Starting node /app/main.js ${ONVIF_CONFIG}..."
 exec node /app/main.js "${ONVIF_CONFIG}"
