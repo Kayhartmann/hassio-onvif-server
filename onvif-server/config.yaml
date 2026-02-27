@@ -1,0 +1,46 @@
+name: "ONVIF Server"
+version: "1.0.0"
+slug: "onvif_server"
+description: "Virtual ONVIF Server für UniFi Protect – wandelt RTSP-Streams in ONVIF-Kameras um"
+url: "https://github.com/Kayhartmann/hassio-onvif-server"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+startup: services
+boot: auto
+host_network: true
+map:
+  - config:rw
+options:
+  cameras:
+    - name: "Garten"
+      rtsp_url: "rtsp://admin:Ihkh1985@10.10.9.33:8556/Garten"
+      port: 8001
+      width: 1920
+      height: 1080
+      fps: 15
+      bitrate: 2048
+    - name: "Eingang"
+      rtsp_url: "rtsp://admin:Ihkh1985@10.10.9.33:8556/Eingang"
+      port: 8002
+      width: 1920
+      height: 1080
+      fps: 15
+      bitrate: 2048
+    - name: "kroeten"
+      rtsp_url: "rtsp://admin:Ihkh1985@10.10.9.33:8556/kroeten"
+      port: 8003
+      width: 1920
+      height: 1080
+      fps: 15
+      bitrate: 2048
+schema:
+  cameras:
+    - name: str
+      rtsp_url: str
+      port: int
+      width: int
+      height: int
+      fps: int
+      bitrate: int
