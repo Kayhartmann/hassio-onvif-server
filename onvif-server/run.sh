@@ -57,12 +57,23 @@ for i in $(seq 1 "${CAMERA_COUNT}"); do
   echo "[onvif-server] ${VLAN}  MAC=${MAC}  IP=${STATIC_IP}"
 done
 
+# foscam – hardcoded 4th camera (640x480, go2rtc path /foscam)
+if ip link show "onvif-cam-4" > /dev/null 2>&1; then
+  echo "[onvif-server] Removing stale interface onvif-cam-4..."
+  ip link delete "onvif-cam-4" 2>/dev/null || true
+fi
+ip link add "onvif-cam-4" link "${IFACE}" address "a2:a2:a2:a2:a2:04" type macvlan mode bridge
+ip addr add "${SUBNET}.244/24" dev "onvif-cam-4"
+ip link set "onvif-cam-4" up
+echo "[onvif-server] onvif-cam-4  MAC=a2:a2:a2:a2:a2:04  IP=${SUBNET}.244"
+
 # ─── Step 5: Log camera IP summary ──────────────────────────────────────────
 IP_LIST=""
 for i in $(seq 1 "${CAMERA_COUNT}"); do
   IP_LIST="${IP_LIST}${SUBNET}.$((240 + i))"
   if [ "${i}" -lt "${CAMERA_COUNT}" ]; then IP_LIST="${IP_LIST}, "; fi
 done
+IP_LIST="${IP_LIST}, ${SUBNET}.244 (foscam)"
 echo "[onvif-server] Camera IPs: ${IP_LIST}"
 
 # ─── Step 6: Generate /data/onvif.yaml ──────────────────────────────────────
@@ -161,13 +172,46 @@ options.cameras.forEach((camera, index) => {
   console.log(`[onvif-server] Camera "${camera.name}": ONVIF=${serverPort}, RTSP fwd=${rtspFwdPort}, MAC=${mac}`);
 });
 
+// foscam – hardcoded 4th camera (640x480, go2rtc path /foscam)
+if (!uuids['foscam']) {
+  uuids['foscam'] = crypto.randomUUID();
+  console.log(`[onvif-server] Generated UUID for "foscam": ${uuids['foscam']}`);
+}
+yaml += `  - mac: a2:a2:a2:a2:a2:04\n`;
+yaml += `    ports:\n`;
+yaml += `      server: 8004\n`;
+yaml += `      rtsp: 8104\n`;
+yaml += `      snapshot: 8204\n`;
+yaml += `    name: foscam\n`;
+yaml += `    uuid: ${uuids['foscam']}\n`;
+yaml += `    highQuality:\n`;
+yaml += `      rtsp: /foscam\n`;
+yaml += `      width: 640\n`;
+yaml += `      height: 480\n`;
+yaml += `      framerate: 15\n`;
+yaml += `      bitrate: 512\n`;
+yaml += `      quality: 4\n`;
+yaml += `    lowQuality:\n`;
+yaml += `      rtsp: /foscam\n`;
+yaml += `      width: 640\n`;
+yaml += `      height: 480\n`;
+yaml += `      framerate: 15\n`;
+yaml += `      bitrate: 512\n`;
+yaml += `      quality: 1\n`;
+yaml += `    target:\n`;
+yaml += `      hostname: 10.10.9.33\n`;
+yaml += `      ports:\n`;
+yaml += `        rtsp: 8556\n`;
+yaml += `        snapshot: 80\n`;
+console.log(`[onvif-server] Camera "foscam": ONVIF=8004, RTSP fwd=8104, MAC=a2:a2:a2:a2:a2:04`);
+
 // Persist UUIDs across container restarts
 fs.writeFileSync(UUID_FILE, JSON.stringify(uuids, null, 2));
 console.log(`[onvif-server] UUIDs saved to ${UUID_FILE}`);
 
 // Write the final config
 fs.writeFileSync(ONVIF_CONFIG, yaml);
-console.log(`[onvif-server] Config written to ${ONVIF_CONFIG} (${options.cameras.length} camera(s))`);
+console.log(`[onvif-server] Config written to ${ONVIF_CONFIG} (${options.cameras.length + 1} camera(s))`);
 NODEJS
 
 # ─── Step 7: Start the ONVIF server ─────────────────────────────────────────
