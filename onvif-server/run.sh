@@ -19,18 +19,30 @@ if [ -z "${IFACE}" ]; then
 fi
 echo "[onvif-server] Primary network interface: ${IFACE}"
 
-# ─── Step 2: Create one MacVLAN interface per camera ────────────────────────
-# Read camera count from options.json via Node.js (no jq dependency needed)
+# ─── Step 2: Read host IP and derive /24 subnet prefix ──────────────────────
+HOST_IP=$(ip addr show "${IFACE}" | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -1)
+if [ -z "${HOST_IP}" ]; then
+  echo "[onvif-server] ERROR: Could not determine host IP on ${IFACE}."
+  exit 1
+fi
+SUBNET=$(echo "${HOST_IP}" | cut -d. -f1,2,3)
+echo "[onvif-server] Host IP: ${HOST_IP}  →  Subnet prefix: ${SUBNET}.0/24"
+
+# ─── Step 3: Read camera count ───────────────────────────────────────────────
 CAMERA_COUNT=$(node -e "
 const o = JSON.parse(require('fs').readFileSync('/data/options.json', 'utf8'));
 process.stdout.write(String(o.cameras.length));
 ")
 echo "[onvif-server] Cameras configured: ${CAMERA_COUNT}"
 
+# ─── Step 4: Create MacVLAN interfaces with static IPs ──────────────────────
+# Static IPs start at .241 (e.g. 10.10.9.241, .242, .243).
+# These must be excluded from your router's DHCP pool – see DOCS.md.
 for i in $(seq 1 "${CAMERA_COUNT}"); do
   IDX=$(printf "%02d" "${i}")
   MAC="a2:a2:a2:a2:a2:${IDX}"
   VLAN="onvif-cam-${i}"
+  STATIC_IP="${SUBNET}.$((240 + i))"
 
   # Remove stale interface from a previous (crashed) run
   if ip link show "${VLAN}" > /dev/null 2>&1; then
@@ -38,35 +50,22 @@ for i in $(seq 1 "${CAMERA_COUNT}"); do
     ip link delete "${VLAN}" 2>/dev/null || true
   fi
 
-  echo "[onvif-server] Creating ${VLAN} link=${IFACE} address=${MAC} type=macvlan mode=bridge"
   ip link add "${VLAN}" link "${IFACE}" address "${MAC}" type macvlan mode bridge
+  ip addr add "${STATIC_IP}/24" dev "${VLAN}"
   ip link set "${VLAN}" up
+
+  echo "[onvif-server] ${VLAN}  MAC=${MAC}  IP=${STATIC_IP}"
 done
 
-# ─── Step 3: Request DHCP leases for all virtual interfaces ─────────────────
-echo "[onvif-server] Requesting DHCP leases (30 s timeout per interface)..."
+# ─── Step 5: Log camera IP summary ──────────────────────────────────────────
+IP_LIST=""
 for i in $(seq 1 "${CAMERA_COUNT}"); do
-  VLAN="onvif-cam-${i}"
-  dhcpcd --nobackground --timeout 30 "${VLAN}" 2>&1 | sed "s/^/[${VLAN}] /" &
+  IP_LIST="${IP_LIST}${SUBNET}.$((240 + i))"
+  if [ "${i}" -lt "${CAMERA_COUNT}" ]; then IP_LIST="${IP_LIST}, "; fi
 done
-wait
-echo "[onvif-server] DHCP requests finished."
+echo "[onvif-server] Camera IPs: ${IP_LIST}"
 
-# ─── Step 4: Wait 5 s and verify IP assignment ──────────────────────────────
-sleep 5
-
-for i in $(seq 1 "${CAMERA_COUNT}"); do
-  VLAN="onvif-cam-${i}"
-  IP=$(ip addr show "${VLAN}" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
-  if [ -n "${IP}" ]; then
-    echo "[onvif-server] ${VLAN} → ${IP}"
-  else
-    echo "[onvif-server] WARNING: ${VLAN} has no IP address – ONVIF discovery may fail for this camera."
-    echo "[onvif-server] Tip: Reserve a static DHCP lease for MAC a2:a2:a2:a2:a2:$(printf '%02d' ${i}) in your router."
-  fi
-done
-
-# ─── Step 5: Generate /data/onvif.yaml ──────────────────────────────────────
+# ─── Step 6: Generate /data/onvif.yaml ──────────────────────────────────────
 echo "[onvif-server] Generating ONVIF configuration..."
 
 node - << 'NODEJS'
@@ -90,7 +89,10 @@ if (fs.existsSync(UUID_FILE)) {
   }
 }
 
-// Build onvif.yaml manually (no external library required)
+// Build onvif.yaml manually (no external library required).
+// The onvif-server resolves the IP for each entry by looking up the MAC
+// address on the host's network interfaces – so the MAC must match the
+// MacVLAN interface we created in the shell section above.
 let yaml = 'onvif:\n';
 
 options.cameras.forEach((camera, index) => {
@@ -111,21 +113,21 @@ options.cameras.forEach((camera, index) => {
 
   const rtspPath   = url.pathname || '/';
   const rtspPort   = parseInt(url.port, 10) || 554;
-  // Embed credentials in hostname so the onvif-server builds:
+  // Embed credentials in hostname so the onvif-server constructs:
   // rtsp://user:pass@host:port/path
   const targetHost = (url.username && url.password)
     ? `${url.username}:${url.password}@${url.hostname}`
     : url.hostname;
 
-  // Port layout per camera (all unique, no overlap with Neolink/go2rtc):
-  //   server   = camera.port        (e.g. 8001) → ONVIF HTTP, what UniFi Protect connects to
+  // Port layout per camera (no overlap with Neolink:8554 or go2rtc:8555/8556):
+  //   server   = camera.port        (e.g. 8001) → ONVIF HTTP (UniFi Protect connects here)
   //   rtsp     = camera.port + 100  (e.g. 8101) → RTSP passthrough
   //   snapshot = camera.port + 200  (e.g. 8201) → Snapshot HTTP
   const serverPort   = camera.port;
   const rtspFwdPort  = camera.port + 100;
   const snapshotPort = camera.port + 200;
 
-  // Locally-administered unicast MAC matching the MacVLAN interface
+  // MAC must match the MacVLAN interface created above
   const macSuffix = String(index + 1).padStart(2, '0');
   const mac = `a2:a2:a2:a2:a2:${macSuffix}`;
 
@@ -143,7 +145,7 @@ options.cameras.forEach((camera, index) => {
   yaml += `      framerate: ${camera.fps}\n`;
   yaml += `      bitrate: ${camera.bitrate}\n`;
   yaml += `      quality: 4\n`;
-  // lowQuality uses the same stream (go2rtc provides a single quality per path)
+  // lowQuality mirrors highQuality – go2rtc exposes a single stream per path
   yaml += `    lowQuality:\n`;
   yaml += `      rtsp: ${rtspPath}\n`;
   yaml += `      width: ${camera.width}\n`;
@@ -169,6 +171,6 @@ fs.writeFileSync(ONVIF_CONFIG, yaml);
 console.log(`[onvif-server] Config written to ${ONVIF_CONFIG} (${options.cameras.length} camera(s))`);
 NODEJS
 
-# ─── Step 6: Start the ONVIF server ─────────────────────────────────────────
+# ─── Step 7: Start the ONVIF server ─────────────────────────────────────────
 echo "[onvif-server] Starting node /app/main.js ${ONVIF_CONFIG}..."
 exec node /app/main.js "${ONVIF_CONFIG}"

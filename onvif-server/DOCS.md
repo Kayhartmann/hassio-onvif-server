@@ -60,6 +60,33 @@ Pro Kamera werden automatisch **3 Ports** verwendet:
 
 ---
 
+## Netzwerk-Vorbereitung (wichtig!)
+
+### Statische IPs für virtuelle Kamera-Interfaces
+
+Das Add-on erstellt beim Start für jede Kamera ein virtuelles MacVLAN-Netzwerkinterface und weist ihm eine **statische IP-Adresse** zu:
+
+| Kamera (Reihenfolge) | MAC               | Statische IP     |
+|----------------------|-------------------|------------------|
+| 1. Kamera            | `a2:a2:a2:a2:a2:01` | `<Subnet>.241` |
+| 2. Kamera            | `a2:a2:a2:a2:a2:02` | `<Subnet>.242` |
+| 3. Kamera            | `a2:a2:a2:a2:a2:03` | `<Subnet>.243` |
+
+`<Subnet>` wird automatisch aus der IP deines Home-Assistant-Hosts abgeleitet.
+Beispiel: Host-IP `10.10.9.33` → Kamera-IPs `10.10.9.241`, `10.10.9.242`, `10.10.9.243`
+
+> **Pflichtschritt im Router:** Schließe die Adressen `.241`, `.242` und `.243` aus dem DHCP-Pool deines Routers aus, damit kein anderes Gerät im Netzwerk diese IPs zugewiesen bekommt und es zu IP-Konflikten kommt.
+>
+> - **Fritzbox:** Heimnetz → Netzwerk → IPv4-Adressen → DHCP-Einstellungen → „Von … bis …" so begrenzen, dass .241–.243 außerhalb liegen (z. B. Pool bis .240).
+> - **UniFi/UDM:** Networks → LAN → DHCP Range → End auf z. B. `…240` setzen.
+> - **OpenWRT:** Network → Interfaces → DHCP-Server → Limit auf z. B. 240 Adressen setzen.
+
+### Warum kein DHCP?
+
+MacVLAN-Interfaces im Bridge-Mode können den DHCP-Server des Hosts nicht erreichen (bekannte Linux-Netzwerkeinschränkung). Statische IPs umgehen dieses Problem zuverlässig.
+
+---
+
 ## Netzwerk-Anforderungen
 
 Das Add-on läuft mit `host_network: true`, was für **WS-Discovery** (UDP Multicast Port 3702) zwingend erforderlich ist. UniFi Protect kann die virtuellen Kameras damit automatisch per Netzwerk-Scan finden.
