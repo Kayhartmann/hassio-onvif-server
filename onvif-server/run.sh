@@ -35,14 +35,11 @@ process.stdout.write(String(o.cameras.length));
 ")
 echo "[onvif-server] Cameras configured: ${CAMERA_COUNT}"
 
-# ─── Step 4: Create MacVLAN interfaces with static IPs ──────────────────────
-# Static IPs start at .241 (e.g. 10.10.9.241, .242, .243).
-# These must be excluded from your router's DHCP pool – see DOCS.md.
+# ─── Step 4: Create MacVLAN interfaces and assign IPs via DHCP ───────────────
 for i in $(seq 1 "${CAMERA_COUNT}"); do
   IDX=$(printf "%02d" "${i}")
   MAC="a2:a2:a2:a2:a2:${IDX}"
   VLAN="onvif-cam-${i}"
-  STATIC_IP="${SUBNET}.$((240 + i))"
 
   # Remove stale interface from a previous (crashed) run
   if ip link show "${VLAN}" > /dev/null 2>&1; then
@@ -51,30 +48,31 @@ for i in $(seq 1 "${CAMERA_COUNT}"); do
   fi
 
   ip link add "${VLAN}" link "${IFACE}" address "${MAC}" type macvlan mode bridge
-  ip addr add "${STATIC_IP}/24" dev "${VLAN}"
   ip link set "${VLAN}" up
 
-  echo "[onvif-server] ${VLAN}  MAC=${MAC}  IP=${STATIC_IP}"
+  echo "[onvif-server] ${VLAN}  MAC=${MAC} — requesting DHCP lease..."
+  if udhcpc -i "${VLAN}" -s /usr/bin/udhcpc-onvif-script -n -q -t 10 -T 3 2>/dev/null; then
+    ASSIGNED=$(ip addr show "${VLAN}" | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -1)
+    echo "[onvif-server] ${VLAN}  MAC=${MAC}  IP=${ASSIGNED}"
+  else
+    echo "[onvif-server] WARNING: DHCP failed for ${VLAN} (MAC=${MAC}) – camera may be unreachable"
+  fi
 done
 
-# foscam – hardcoded 4th camera (640x480, go2rtc path /foscam)
+# foscam – hardcoded 4th virtual camera (640×480, go2rtc path /foscam)
 if ip link show "onvif-cam-4" > /dev/null 2>&1; then
   echo "[onvif-server] Removing stale interface onvif-cam-4..."
   ip link delete "onvif-cam-4" 2>/dev/null || true
 fi
 ip link add "onvif-cam-4" link "${IFACE}" address "a2:a2:a2:a2:a2:04" type macvlan mode bridge
-ip addr add "${SUBNET}.244/24" dev "onvif-cam-4"
 ip link set "onvif-cam-4" up
-echo "[onvif-server] onvif-cam-4  MAC=a2:a2:a2:a2:a2:04  IP=${SUBNET}.244"
-
-# ─── Step 5: Log camera IP summary ──────────────────────────────────────────
-IP_LIST=""
-for i in $(seq 1 "${CAMERA_COUNT}"); do
-  IP_LIST="${IP_LIST}${SUBNET}.$((240 + i))"
-  if [ "${i}" -lt "${CAMERA_COUNT}" ]; then IP_LIST="${IP_LIST}, "; fi
-done
-IP_LIST="${IP_LIST}, ${SUBNET}.244 (foscam)"
-echo "[onvif-server] Camera IPs: ${IP_LIST}"
+echo "[onvif-server] onvif-cam-4  MAC=a2:a2:a2:a2:a2:04 — requesting DHCP lease..."
+if udhcpc -i "onvif-cam-4" -s /usr/bin/udhcpc-onvif-script -n -q -t 10 -T 3 2>/dev/null; then
+  FOSCAM_IP=$(ip addr show "onvif-cam-4" | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -1)
+  echo "[onvif-server] onvif-cam-4  MAC=a2:a2:a2:a2:a2:04  IP=${FOSCAM_IP}"
+else
+  echo "[onvif-server] WARNING: DHCP failed for onvif-cam-4 (foscam) – camera may be unreachable"
+fi
 
 # ─── Step 6: Generate /data/onvif.yaml ──────────────────────────────────────
 echo "[onvif-server] Generating ONVIF configuration..."
@@ -214,6 +212,78 @@ fs.writeFileSync(ONVIF_CONFIG, yaml);
 console.log(`[onvif-server] Config written to ${ONVIF_CONFIG} (${options.cameras.length + 1} camera(s))`);
 NODEJS
 
-# ─── Step 7: Start the ONVIF server ─────────────────────────────────────────
+# ─── Step 6b: Write runtime state for dashboard ──────────────────────────────
+echo "[onvif-server] Writing dashboard state..."
+export HOST_IP SUBNET
+node - << 'STATEJS'
+const fs  = require('fs');
+const os  = require('os');
+const opts = JSON.parse(fs.readFileSync('/data/options.json', 'utf8'));
+const hostIp = process.env.HOST_IP;
+const subnet  = process.env.SUBNET;
+
+// Look up the IP assigned to a MacVLAN interface by its MAC address.
+// This works regardless of DHCP or static assignment.
+function getIpByMac(mac) {
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of (ifaces[name] || [])) {
+      if (iface.family === 'IPv4' &&
+          iface.mac  &&
+          iface.mac.toLowerCase() === mac.toLowerCase()) {
+        return iface.address;
+      }
+    }
+  }
+  return null;
+}
+
+const username = opts.username || 'admin';
+const password = opts.password || 'admin';
+
+const cameras = (opts.cameras || []).map((cam, i) => {
+  const idx = String(i + 1).padStart(2, '0');
+  const mac = `a2:a2:a2:a2:a2:${idx}`;
+  return {
+    name:          cam.name,
+    mac,
+    ip:            getIpByMac(mac),
+    onvif_port:    cam.port,
+    rtsp_port:     cam.port + 100,
+    snapshot_port: cam.port + 200,
+    rtsp_url:      cam.rtsp_url,
+    width:         cam.width,
+    height:        cam.height,
+    fps:           cam.fps,
+    bitrate:       cam.bitrate,
+  };
+});
+
+// foscam (hardcoded 4th camera)
+const foscamMac = 'a2:a2:a2:a2:a2:04';
+cameras.push({
+  name:          'foscam',
+  mac:           foscamMac,
+  ip:            getIpByMac(foscamMac),
+  onvif_port:    8004,
+  rtsp_port:     8104,
+  snapshot_port: 8204,
+  rtsp_url:      'rtsp://' + hostIp + ':8556/foscam',
+  width:         640,
+  height:        480,
+  fps:           15,
+  bitrate:       512,
+});
+
+const state = { host_ip: hostIp, subnet, username, password, cameras };
+fs.writeFileSync('/tmp/onvif-state.json', JSON.stringify(state, null, 2));
+console.log(`[onvif-server] Dashboard state written to /tmp/onvif-state.json (${cameras.length} camera(s))`);
+STATEJS
+
+# ─── Step 7: Start dashboard in background ───────────────────────────────────
+echo "[onvif-server] Starting dashboard on port 8099..."
+node /dashboard/server.js &
+
+# ─── Step 8: Start the ONVIF server (main process) ───────────────────────────
 echo "[onvif-server] Starting node /app/main.js ${ONVIF_CONFIG}..."
 exec node /app/main.js "${ONVIF_CONFIG}"

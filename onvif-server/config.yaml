@@ -1,5 +1,5 @@
 name: "ONVIF Server"
-version: "1.0.4"
+version: "1.0.6"
 slug: "onvif_server"
 description: "Virtual ONVIF Server für UniFi Protect – wandelt RTSP-Streams in ONVIF-Kameras um"
 url: "https://github.com/Kayhartmann/hassio-onvif-server"
@@ -10,6 +10,10 @@ arch:
 startup: services
 boot: auto
 host_network: true
+ingress: true
+ingress_port: 8098
+panel_icon: mdi:cctv
+panel_title: "ONVIF Server"
 privileged:
   - NET_ADMIN
 kernel_modules: true
@@ -38,7 +42,11 @@ options:
       height: 1080
       fps: 15
       bitrate: 2048
+  username: "admin"
+  password: "admin"
 schema:
+  username: str
+  password: str
   cameras:
     - name: str
       rtsp_url: str

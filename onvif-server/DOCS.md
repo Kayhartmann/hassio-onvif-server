@@ -16,9 +16,9 @@ Basiert auf [daniela-hase/onvif-server](https://github.com/daniela-hase/onvif-se
 
 ## Konfiguration
 
-Die Kameras werden unter **Konfiguration** des Add-ons eingetragen:
-
 ```yaml
+username: "admin"
+password: "admin"
 cameras:
   - name: "Garten"
     rtsp_url: "rtsp://user:pass@10.10.9.33:8556/Garten"
@@ -38,6 +38,8 @@ cameras:
 
 | Feld       | Beschreibung                                              |
 |------------|-----------------------------------------------------------|
+| `username` | Benutzername für UniFi Protect (Standard: `admin`)       |
+| `password` | Passwort für UniFi Protect (Standard: `admin`)           |
 | `name`     | Anzeigename der Kamera in UniFi Protect                  |
 | `rtsp_url` | Vollständige RTSP-URL inkl. Credentials und Pfad         |
 | `port`     | ONVIF HTTP-Port (jede Kamera braucht einen eigenen Port) |
@@ -56,57 +58,57 @@ Pro Kamera werden automatisch **3 Ports** verwendet:
 | RTSP Passthrough   | `port + 100`         | 8101                  |
 | Snapshot HTTP      | `port + 200`         | 8201                  |
 
-> **Hinweis:** Ports 8554 (Neolink) und 8555 (go2rtc WebRTC) sind belegt – ONVIF-Ports ab 8001 verwenden.
+> **Hinweis:** Ports 8554 (Neolink) und 8555/8556 (go2rtc) sind belegt – ONVIF-Ports ab 8001 verwenden.
 
 ---
 
-## Netzwerk-Vorbereitung (wichtig!)
+## Netzwerk
 
-### Statische IPs für virtuelle Kamera-Interfaces
+Das Add-on erstellt beim Start für jede Kamera ein virtuelles **MacVLAN-Netzwerkinterface** und bezieht per **DHCP** automatisch eine IP-Adresse vom Router.
 
-Das Add-on erstellt beim Start für jede Kamera ein virtuelles MacVLAN-Netzwerkinterface und weist ihm eine **statische IP-Adresse** zu:
+| Kamera (Reihenfolge) | MAC                   | IP-Vergabe |
+|----------------------|-----------------------|------------|
+| 1. Kamera            | `a2:a2:a2:a2:a2:01`  | DHCP       |
+| 2. Kamera            | `a2:a2:a2:a2:a2:02`  | DHCP       |
+| 3. Kamera            | `a2:a2:a2:a2:a2:03`  | DHCP       |
 
-| Kamera (Reihenfolge) | MAC               | Statische IP     |
-|----------------------|-------------------|------------------|
-| 1. Kamera            | `a2:a2:a2:a2:a2:01` | `<Subnet>.241` |
-| 2. Kamera            | `a2:a2:a2:a2:a2:02` | `<Subnet>.242` |
-| 3. Kamera            | `a2:a2:a2:a2:a2:03` | `<Subnet>.243` |
+Die vergebenen IPs sind im **Dashboard** des Add-ons sichtbar (Seitenleiste → ONVIF Server).
 
-`<Subnet>` wird automatisch aus der IP deines Home-Assistant-Hosts abgeleitet.
-Beispiel: Host-IP `10.10.9.33` → Kamera-IPs `10.10.9.241`, `10.10.9.242`, `10.10.9.243`
+> **Empfehlung:** Im Router für die MAC-Adressen oben eine **DHCP-Reservierung** einrichten, damit die IPs stabil bleiben.
+> - **Fritzbox:** Heimnetz → Netzwerk → IP-Adressen → DHCP-Reservierungen
+> - **UniFi/UDM:** Networks → LAN → DHCP → Static Leases
+> - **OpenWRT:** Network → DHCP & DNS → Static Leases
 
-> **Pflichtschritt im Router:** Schließe die Adressen `.241`, `.242` und `.243` aus dem DHCP-Pool deines Routers aus, damit kein anderes Gerät im Netzwerk diese IPs zugewiesen bekommt und es zu IP-Konflikten kommt.
->
-> - **Fritzbox:** Heimnetz → Netzwerk → IPv4-Adressen → DHCP-Einstellungen → „Von … bis …" so begrenzen, dass .241–.243 außerhalb liegen (z. B. Pool bis .240).
-> - **UniFi/UDM:** Networks → LAN → DHCP Range → End auf z. B. `…240` setzen.
-> - **OpenWRT:** Network → Interfaces → DHCP-Server → Limit auf z. B. 240 Adressen setzen.
-
-### Warum kein DHCP?
-
-MacVLAN-Interfaces im Bridge-Mode können den DHCP-Server des Hosts nicht erreichen (bekannte Linux-Netzwerkeinschränkung). Statische IPs umgehen dieses Problem zuverlässig.
-
----
-
-## Netzwerk-Anforderungen
-
-Das Add-on läuft mit `host_network: true`, was für **WS-Discovery** (UDP Multicast Port 3702) zwingend erforderlich ist. UniFi Protect kann die virtuellen Kameras damit automatisch per Netzwerk-Scan finden.
+Das Add-on läuft mit `host_network: true`, was für **WS-Discovery** (UDP Multicast Port 3702) erforderlich ist.
 
 ---
 
 ## Einbindung in UniFi Protect
 
-1. UniFi Protect → **Kameras → Kamera hinzufügen → ONVIF-Gerät**
-2. IP-Adresse des Home-Assistant-Hosts eingeben
-3. Port: den konfigurierten `port` der gewünschten Kamera (z. B. `8001`)
-4. Kein Benutzername/Passwort erforderlich (virtuelles Gerät ohne Auth)
+Das Dashboard des Add-ons (Seitenleiste → ONVIF Server) zeigt pro Kamera die vollständige **ONVIF-URL** sowie die Zugangsdaten für UniFi Protect.
 
-Alternativ erkennt UniFi Protect die Kameras automatisch über WS-Discovery.
+1. UniFi Protect → **Kameras → Kamera hinzufügen → ONVIF-Gerät**
+2. IP-Adresse der Kamera eintragen (aus dem Dashboard, z. B. `10.10.9.52`)
+3. Port: den konfigurierten `port` der gewünschten Kamera (z. B. `8001`)
+4. Benutzername und Passwort: wie in der Konfiguration gesetzt (Standard: `admin` / `admin`)
+
+Alternativ erkennt UniFi Protect die Kameras automatisch über **WS-Discovery** beim Netzwerk-Scan.
 
 ---
 
 ## Persistenz
 
 UUIDs werden beim ersten Start generiert und in `/data/uuids.json` gespeichert. Dadurch bleiben die virtuellen Geräte-IDs bei Neustart des Add-ons stabil – UniFi Protect erkennt die Kameras als bekannte Geräte wieder.
+
+---
+
+## Dashboard
+
+Das integrierte Web-Dashboard zeigt:
+- Status des ONVIF-Servers (Online/Offline)
+- Pro Kamera: MacVLAN-IP, ONVIF-URL, RTSP-URL, Snapshot-URL (mit Copy-Button)
+- Zugangsdaten für UniFi Protect
+- Auflösung, FPS, Bitrate
 
 ---
 
